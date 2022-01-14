@@ -7064,48 +7064,6 @@ build_lswitch_arp_nd_responder_known_ips(struct ovn_port *op,
                                             ds_cstr(match), "next;",
                                             &op->nbsp->header_);
                 }
-
-                /* For ND solicitations, we need to listen for both the
-                 * unicast IPv6 address and its all-nodes multicast address,
-                 * but always respond with the unicast IPv6 address. */
-                for (size_t j = 0; j < op->lsp_addrs[i].n_ipv6_addrs; j++) {
-                    ds_clear(match);
-                    ds_put_format(match,
-                            "nd_ns && ip6.dst == {%s, %s} && nd.target == %s",
-                            op->lsp_addrs[i].ipv6_addrs[j].addr_s,
-                            op->lsp_addrs[i].ipv6_addrs[j].sn_addr_s,
-                            op->lsp_addrs[i].ipv6_addrs[j].addr_s);
-
-                    ds_clear(actions);
-                    ds_put_format(actions,
-                            "%s { "
-                            "eth.src = %s; "
-                            "ip6.src = %s; "
-                            "nd.target = %s; "
-                            "nd.tll = %s; "
-                            "outport = inport; "
-                            "flags.loopback = 1; "
-                            "output; "
-                            "};",
-                            lsp_is_router(op->nbsp) ? "nd_na_router" : "nd_na",
-                            op->lsp_addrs[i].ea_s,
-                            op->lsp_addrs[i].ipv6_addrs[j].addr_s,
-                            op->lsp_addrs[i].ipv6_addrs[j].addr_s,
-                            op->lsp_addrs[i].ea_s);
-                    ovn_lflow_add_with_hint(lflows, op->od,
-                                            S_SWITCH_IN_ARP_ND_RSP, 50,
-                                            ds_cstr(match),
-                                            ds_cstr(actions),
-                                            &op->nbsp->header_);
-
-                    /* Do not reply to a solicitation from the port that owns
-                     * the address (otherwise DAD detection will fail). */
-                    ds_put_format(match, " && inport == %s", op->json_key);
-                    ovn_lflow_add_with_hint(lflows, op->od,
-                                            S_SWITCH_IN_ARP_ND_RSP, 100,
-                                            ds_cstr(match), "next;",
-                                            &op->nbsp->header_);
-                }
             }
         }
     }
