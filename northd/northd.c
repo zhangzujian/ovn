@@ -121,18 +121,19 @@ enum ovn_stage {
     PIPELINE_STAGE(SWITCH, IN,  QOS_METER,     11, "ls_in_qos_meter")     \
     PIPELINE_STAGE(SWITCH, IN,  LB,            12, "ls_in_lb")  \
     PIPELINE_STAGE(SWITCH, IN,  ACL_AFTER_LB,  13, "ls_in_acl_after_lb")  \
-    PIPELINE_STAGE(SWITCH, IN,  STATEFUL,      14, "ls_in_stateful")      \
-    PIPELINE_STAGE(SWITCH, IN,  PRE_HAIRPIN,   15, "ls_in_pre_hairpin")   \
-    PIPELINE_STAGE(SWITCH, IN,  NAT_HAIRPIN,   16, "ls_in_nat_hairpin")   \
-    PIPELINE_STAGE(SWITCH, IN,  HAIRPIN,       17, "ls_in_hairpin")       \
-    PIPELINE_STAGE(SWITCH, IN,  ARP_ND_RSP,    18, "ls_in_arp_rsp")       \
-    PIPELINE_STAGE(SWITCH, IN,  DHCP_OPTIONS,  19, "ls_in_dhcp_options")  \
-    PIPELINE_STAGE(SWITCH, IN,  DHCP_RESPONSE, 20, "ls_in_dhcp_response") \
-    PIPELINE_STAGE(SWITCH, IN,  DNS_LOOKUP,    21, "ls_in_dns_lookup")    \
-    PIPELINE_STAGE(SWITCH, IN,  DNS_RESPONSE,  22, "ls_in_dns_response")  \
-    PIPELINE_STAGE(SWITCH, IN,  EXTERNAL_PORT, 23, "ls_in_external_port") \
-    PIPELINE_STAGE(SWITCH, IN,  L2_LKUP,       24, "ls_in_l2_lkup")       \
-    PIPELINE_STAGE(SWITCH, IN,  L2_UNKNOWN,    25, "ls_in_l2_unknown")    \
+    PIPELINE_STAGE(SWITCH, IN,  AFTER_LB,      14, "ls_in_after_lb")      \
+    PIPELINE_STAGE(SWITCH, IN,  STATEFUL,      15, "ls_in_stateful")      \
+    PIPELINE_STAGE(SWITCH, IN,  PRE_HAIRPIN,   16, "ls_in_pre_hairpin")   \
+    PIPELINE_STAGE(SWITCH, IN,  NAT_HAIRPIN,   17, "ls_in_nat_hairpin")   \
+    PIPELINE_STAGE(SWITCH, IN,  HAIRPIN,       18, "ls_in_hairpin")       \
+    PIPELINE_STAGE(SWITCH, IN,  ARP_ND_RSP,    19, "ls_in_arp_rsp")       \
+    PIPELINE_STAGE(SWITCH, IN,  DHCP_OPTIONS,  20, "ls_in_dhcp_options")  \
+    PIPELINE_STAGE(SWITCH, IN,  DHCP_RESPONSE, 21, "ls_in_dhcp_response") \
+    PIPELINE_STAGE(SWITCH, IN,  DNS_LOOKUP,    22, "ls_in_dns_lookup")    \
+    PIPELINE_STAGE(SWITCH, IN,  DNS_RESPONSE,  23, "ls_in_dns_response")  \
+    PIPELINE_STAGE(SWITCH, IN,  EXTERNAL_PORT, 24, "ls_in_external_port") \
+    PIPELINE_STAGE(SWITCH, IN,  L2_LKUP,       25, "ls_in_l2_lkup")       \
+    PIPELINE_STAGE(SWITCH, IN,  L2_UNKNOWN,    26, "ls_in_l2_unknown")    \
                                                                           \
     /* Logical switch egress stages. */                                   \
     PIPELINE_STAGE(SWITCH, OUT, PRE_LB,       0, "ls_out_pre_lb")         \
@@ -7017,11 +7018,65 @@ build_lb_rules(struct hmap *lflows, struct ovn_northd_lb *lb,
 }
 
 static void
+build_lb_known_backends_rules(struct ovn_port *op,
+                              struct hmap *lflows,
+                              struct ds *actions,
+                              struct ds *match)
+{
+    if (op->nbsp) {
+        if (strcmp(op->nbsp->type, "virtual") &&
+            strcmp(op->nbsp->type, "localport")) {
+            if (op->n_lsp_addrs != 1 || !strlen(op->lsp_addrs[0].ea_s) ||
+                (!op->lsp_addrs[0].n_ipv4_addrs &&
+                 !op->lsp_addrs[0].n_ipv6_addrs)) {
+                return;
+            }
+            if (lsp_is_router(op->nbsp)) {
+                return;
+            }
+            if (lsp_is_external(op->nbsp) || op->has_unknown) {
+                return;
+            }
+
+            for (size_t i = 0; i < op->lsp_addrs[0].n_ipv4_addrs; i++) {
+                ds_clear(match);
+                ds_put_format(match, "ip4.dst == %s",
+                              op->lsp_addrs[0].ipv4_addrs[i].addr_s);
+                ds_clear(actions);
+                ds_put_format(actions, "eth.dst = %s; next;",
+                              op->lsp_addrs[0].ea_s);
+                ovn_lflow_add_with_hint(lflows, op->od,
+                                        S_SWITCH_IN_AFTER_LB, 50,
+                                        ds_cstr(match),
+                                        ds_cstr(actions),
+                                        &op->nbsp->header_);
+            }
+
+            for (size_t i = 0; i < op->lsp_addrs[0].n_ipv6_addrs; i++) {
+                ds_clear(match);
+                ds_put_format(match, "ip6.dst == %s",
+                              op->lsp_addrs[0].ipv6_addrs[i].addr_s);
+                ds_clear(actions);
+                ds_put_format(actions, "eth.dst = %s; next;",
+                              op->lsp_addrs[0].ea_s);
+                ovn_lflow_add_with_hint(lflows, op->od,
+                                        S_SWITCH_IN_AFTER_LB, 50,
+                                        ds_cstr(match),
+                                        ds_cstr(actions),
+                                        &op->nbsp->header_);
+            }
+        }
+    }
+}
+
+static void
 build_stateful(struct ovn_datapath *od, struct hmap *lflows)
 {
     /* Ingress LB, Ingress and Egress stateful Table (Priority 0): Packets are
      * allowed by default. */
     ovn_lflow_add(lflows, od, S_SWITCH_IN_LB, 0, "1", "next;");
+    ovn_lflow_add(lflows, od, S_SWITCH_IN_AFTER_LB, 100, "!ct.dnat", "next;");
+    ovn_lflow_add(lflows, od, S_SWITCH_IN_AFTER_LB, 0, "1", "next;");
     ovn_lflow_add(lflows, od, S_SWITCH_IN_STATEFUL, 0, "1", "next;");
     ovn_lflow_add(lflows, od, S_SWITCH_OUT_STATEFUL, 0, "1", "next;");
 
@@ -13678,6 +13733,7 @@ build_lswitch_and_lrouter_iterate_by_op(struct ovn_port *op,
                                              lsi->meter_groups,
                                              &lsi->actions,
                                              &lsi->match);
+    build_lb_known_backends_rules(op, lsi->lflows, &lsi->actions, &lsi->match);
     build_lswitch_dhcp_options_and_response(op, lsi->lflows,
                                             lsi->meter_groups);
     build_lswitch_external_port(op, lsi->lflows);
