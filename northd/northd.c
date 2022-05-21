@@ -22,6 +22,7 @@
 #include "ipam.h"
 #include "openvswitch/dynamic-string.h"
 #include "hash.h"
+#include "sha1.h"
 #include "hmapx.h"
 #include "openvswitch/hmap.h"
 #include "openvswitch/json.h"
@@ -6015,10 +6016,9 @@ build_pre_stateful(struct ovn_datapath *od, struct hmap *lflows)
     /* If REGBIT_CONNTRACK_DEFRAG is set as 1, then the packets should be
      * sent to conntrack for tracking and defragmentation. */
     ovn_lflow_add(lflows, od, S_SWITCH_IN_PRE_STATEFUL, 100,
-                  REGBIT_CONNTRACK_DEFRAG" == 1", "ct_next;");
-
+                  "1", "ct_next;");
     ovn_lflow_add(lflows, od, S_SWITCH_OUT_PRE_STATEFUL, 100,
-                  REGBIT_CONNTRACK_DEFRAG" == 1", "ct_next;");
+                  "1", "ct_next;");
 }
 
 static void
@@ -6945,13 +6945,65 @@ build_lb_rules(struct hmap *lflows, struct ovn_northd_lb *lb,
 }
 
 static void
-build_stateful(struct ovn_datapath *od, struct hmap *lflows)
+build_stateful(struct ovn_datapath *od, const struct hmap *ports, struct hmap *lflows)
 {
     /* Ingress LB, Ingress and Egress stateful Table (Priority 0): Packets are
      * allowed by default. */
     ovn_lflow_add(lflows, od, S_SWITCH_IN_LB, 0, "1", "next;");
     ovn_lflow_add(lflows, od, S_SWITCH_IN_STATEFUL, 0, "1", "next;");
     ovn_lflow_add(lflows, od, S_SWITCH_OUT_STATEFUL, 0, "1", "next;");
+
+    if (od->nbs && !strcmp(od->nbs->name, "join")) {
+        struct ds match = DS_EMPTY_INITIALIZER;
+        struct ds actions = DS_EMPTY_INITIALIZER;
+
+        for (size_t i = 0; i < od->nbs->n_ports; i++) {
+            const struct nbrec_logical_switch_port *nbsp = od->nbs->ports[i];
+            struct ovn_port *op = ovn_port_find(ports, nbsp->name);
+            if (!op) {
+                continue;
+            }
+
+            if (op->peer) {
+                if (op->peer->nbrp) {
+                }
+                continue;
+            }
+
+            // for (size_t i = 0; i < op->nbsp->n_addresses; i++) {
+            /* Addresses are owned by the logical port.
+             * Ethernet address followed by zero or more IPv4
+             * or IPv6 addresses (or both). */
+            struct eth_addr ea;
+            if (!ovs_scan(op->nbsp->addresses[0], ETH_ADDR_SCAN_FMT, ETH_ADDR_SCAN_ARGS(ea))) {
+                continue;
+            }
+
+            uint8_t sha1_hash[SHA1_DIGEST_SIZE];
+            char sha1_hash_hex[SHA1_HEX_DIGEST_LEN + 1];
+            sha1_bytes(nbsp->name, strlen(nbsp->name), sha1_hash);
+            sha1_to_hex(sha1_hash, sha1_hash_hex);
+            sha1_hash_hex[8] = '\0';
+            ds_put_format(&match, "inport == \"%s\" && ct.new", nbsp->name);
+            ds_put_format(&actions, "ct_commit { ct_label.blocked = 0; "
+                          "ct_label.label = 0x%s; }; next;", sha1_hash_hex);
+            ovn_lflow_add(lflows, od, S_SWITCH_IN_STATEFUL, 110,
+                          ds_cstr(&match), ds_cstr(&actions));
+            ds_clear(&match);
+            ds_clear(&actions);
+
+            ds_put_format(&match, "ct.rpl && ct_label.label == 0x%s", sha1_hash_hex);
+            ds_put_format(&actions,"eth.dst = "ETH_ADDR_FMT"; next;", 
+                          ETH_ADDR_ARGS(ea));
+            ovn_lflow_add(lflows, od, S_SWITCH_IN_STATEFUL, 110,
+                          ds_cstr(&match), ds_cstr(&actions));
+            ds_clear(&match);
+            ds_clear(&actions);
+        }
+
+        ds_destroy(&actions);
+        ds_destroy(&match);
+    }
 
     /* If REGBIT_CONNTRACK_COMMIT is set as 1 and
      * REGBIT_CONNTRACK_SET_LABEL is set to 1, then the packets should be
@@ -7719,6 +7771,7 @@ build_lswitch_flows(const struct hmap *datapaths,
 static void
 build_lswitch_lflows_pre_acl_and_acl(struct ovn_datapath *od,
                                      const struct hmap *port_groups,
+                                     const struct hmap *ports,
                                      struct hmap *lflows,
                                      const struct shash *meter_groups)
 {
@@ -7731,7 +7784,7 @@ build_lswitch_lflows_pre_acl_and_acl(struct ovn_datapath *od,
         build_acl_hints(od, lflows);
         build_acls(od, lflows, port_groups, meter_groups);
         build_qos(od, lflows);
-        build_stateful(od, lflows);
+        build_stateful(od, ports, lflows);
         build_lb_hairpin(od, lflows);
     }
 }
@@ -13504,7 +13557,7 @@ build_lswitch_and_lrouter_iterate_by_od(struct ovn_datapath *od,
                                         struct lswitch_flow_build_info *lsi)
 {
     /* Build Logical Switch Flows. */
-    build_lswitch_lflows_pre_acl_and_acl(od, lsi->port_groups, lsi->lflows,
+    build_lswitch_lflows_pre_acl_and_acl(od, lsi->port_groups, lsi->ports, lsi->lflows,
                                          lsi->meter_groups);
 
     build_fwd_group_lflows(od, lsi->lflows);
