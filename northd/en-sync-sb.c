@@ -206,6 +206,11 @@ sync_addr_set(struct ovsdb_idl_txn *ovnsb_txn, const char *name,
     if (!sb_address_set) {
         sb_address_set = sbrec_address_set_insert(ovnsb_txn);
         sbrec_address_set_set_name(sb_address_set, name);
+        if (addrs) {
+            VLOG_WARN("set addresses of %s to %s", name, *addrs);
+        } else {
+            VLOG_WARN("clear addresses of %s", name);
+        }
         sbrec_address_set_set_addresses(sb_address_set,
                                         addrs, n_addrs);
     } else {
@@ -343,6 +348,7 @@ update_sb_addr_set(const char **nb_addresses, size_t n_addresses,
         for (size_t i = 0; i < addr_added->n_values; i++) {
             ds_clear(&ds);
             expr_constant_format(&addr_added->values[i], EXPR_C_INTEGER, &ds);
+            VLOG_WARN("Add address %s to %s", ds_cstr(&ds), sb_as->name);
             sbrec_address_set_update_addresses_addvalue(sb_as, ds_cstr(&ds));
         }
     }
@@ -352,6 +358,7 @@ update_sb_addr_set(const char **nb_addresses, size_t n_addresses,
             ds_clear(&ds);
             expr_constant_format(&addr_deleted->values[i],
                                  EXPR_C_INTEGER, &ds);
+            VLOG_WARN("Delete address %s from %s", ds_cstr(&ds), sb_as->name);
             sbrec_address_set_update_addresses_delvalue(sb_as, ds_cstr(&ds));
         }
     }
